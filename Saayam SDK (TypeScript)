@@ -1,0 +1,126 @@
+// stayam-sdk/src/index.ts
+import axios, { AxiosInstance, AxiosRequestConfig } from 'axios';
+
+export class StayamClient {
+  private readonly client: AxiosInstance;
+  private authToken?: string;
+
+  constructor(config: {
+    baseUrl: string;
+    clientId?: string;
+    clientSecret?: string;
+  }) {
+    this.client = axios.create({
+      baseURL: config.baseUrl,
+      timeout: 10000,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-SDK-Version': '1.0.0',
+      },
+    });
+
+    // Add interceptors
+    this.client.interceptors.request.use(this.addAuthToken);
+    this.client.interceptors.response.use(
+      response => response,
+      this.handleError
+    );
+  }
+
+  public async authenticate(username: string, password: string): Promise<void> {
+    const response = await this.client.post('/auth', { username, password });
+    this.authToken = response.data.token;
+  }
+
+  public async submitSensorData(data: SensorData): Promise<SubmissionResponse> {
+    return this.post('/data/sensor', data);
+  }
+
+  public async getSpatialData(query: SpatialQuery): Promise<SpatialData[]> {
+    return this.get('/data/spatial', { params: query });
+  }
+
+  private async get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
+    const response = await this.client.get<T>(url, config);
+    return response.data;
+  }
+
+  private async post<T>(url: string, data: any): Promise<T> {
+    const response = await this.client.post<T>(url, data);
+    return response.data;
+  }
+
+  private addAuthToken = (config: AxiosRequestConfig) => {
+    if (this.authToken) {
+      config.headers = config.headers || {};
+      config.headers.Authorization = `Bearer ${this.authToken}`;
+    }
+    return config;
+  };
+
+  private handleError = (error: any) => {
+    if (error.response) {
+      // Handle HTTP errors
+      throw new ApiError(
+        error.response.data.message || 'API request failed',
+        error.response.status,
+        error.response.data
+      );
+    } else if (error.request) {
+      // Handle network errors
+      throw new NetworkError('Network error occurred');
+    } else {
+      // Handle other errors
+      throw new Error(error.message);
+    }
+  };
+}
+
+// Error Classes
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: number,
+    public readonly details?: any
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+export class NetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NetworkError';
+  }
+}
+
+// Type Definitions
+interface SensorData {
+  deviceId: string;
+  timestamp: string;
+  coordinates: [number, number];
+  measurements: Record<string, number>;
+}
+
+interface SpatialQuery {
+  boundingBox: [number, number, number, number];
+  timeRange?: {
+    start: string;
+    end: string;
+  };
+  maxResults?: number;
+}
+
+interface SpatialData {
+  id: string;
+  coordinates: [number, number];
+  values: Record<string, number>;
+  timestamp: string;
+}
+
+interface SubmissionResponse {
+  id: string;
+  status: 'success' | 'pending' | 'error';
+  message?: string;
+}
