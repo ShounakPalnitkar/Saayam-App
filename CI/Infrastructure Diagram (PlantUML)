@@ -1,0 +1,42 @@
+@startuml MotionDRG Architecture
+
+skinparam monochrome true
+skinparam defaultFontName Helvetica
+
+rectangle "Clients" {
+  [Web Application] as web
+  [Mobile Apps\n(iOS/Android)] as mobile
+  [3rd Party\nIntegrations] as integrations
+}
+
+rectangle "AWS Cloud" {
+  rectangle "Presentation Layer" {
+    [CloudFront] as cf
+    [S3 Bucket] as s3
+  }
+  
+  rectangle "Application Layer" {
+    [API Gateway] as apigw
+    [Lambda\nFunctions] as lambda
+    [Cognito] as cognito
+  }
+  
+  rectangle "Data Layer" {
+    [MSK Cluster] as msk
+    [DynamoDB] as dynamo
+    [Location\nService] as location
+  }
+}
+
+web --> cf
+mobile --> apigw
+integrations --> apigw
+
+cf --> s3
+apigw --> lambda
+lambda --> msk
+lambda --> dynamo
+lambda --> location
+cognito --> apigw : Auth
+
+@enduml
