@@ -1,0 +1,123 @@
+// src/App.tsx
+import React, { useState } from 'react';
+import { StayamClient, ApiError } from 'stayam-sdk';
+import './App.css';
+
+const App: React.FC = () => {
+  const [data, setData] = useState<SpatialData[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [authenticated, setAuthenticated] = useState(false);
+
+  const sdk = new StayamClient({
+    baseUrl: process.env.REACT_APP_API_URL!,
+  });
+
+  const handleLogin = async (username: string, password: string) => {
+    try {
+      await sdk.authenticate(username, password);
+      setAuthenticated(true);
+      setError(null);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(`Login failed: ${err.message}`);
+      } else {
+        setError('An unexpected error occurred');
+      }
+    }
+  };
+
+  const fetchData = async () => {
+    setLoading(true);
+    try {
+      const result = await sdk.getSpatialData({
+        boundingBox: [-74.5, 40.5, -73.5, 41.5], // NYC area
+        maxResults: 100,
+      });
+      setData(result);
+      setError(null);
+    } catch (err) {
+      if (err instanceof ApiError) {
+        setError(`Data fetch failed: ${err.message}`);
+      } else {
+        setError('Network error occurred');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="app-container">
+      <header className="app-header">
+        <h1>Motion DRG Dashboard</h1>
+        {!authenticated ? (
+          <LoginForm onLogin={handleLogin} error={error} />
+        ) : (
+          <button onClick={fetchData} disabled={loading}>
+            {loading ? 'Loading...' : 'Refresh Data'}
+          </button>
+        )}
+      </header>
+      
+      {error && <div className="error-message">{error}</div>}
+      
+      <div className="data-grid">
+        {data.map((item) => (
+          <DataCard key={item.id} data={item} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const LoginForm: React.FC<{
+  onLogin: (username: string, password: string) => void;
+  error: string | null;
+}> = ({ onLogin, error }) => {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onLogin(username, password);
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="login-form">
+      <input
+        type="text"
+        placeholder="Username"
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+      />
+      <input
+        type="password"
+        placeholder="Password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+      />
+      <button type="submit">Login</button>
+      {error && <div className="error-message">{error}</div>}
+    </form>
+  );
+};
+
+const DataCard: React.FC<{ data: SpatialData }> = ({ data }) => {
+  return (
+    <div className="data-card">
+      <h3>Data Point {data.id}</h3>
+      <p>Coordinates: {data.coordinates.join(', ')}</p>
+      <p>Timestamp: {new Date(data.timestamp).toLocaleString()}</p>
+      <div className="measurements">
+        {Object.entries(data.values).map(([key, value]) => (
+          <div key={key}>
+            <strong>{key}:</strong> {value}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default App;
