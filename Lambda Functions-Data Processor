@@ -1,0 +1,83 @@
+import { Kafka } from 'kafkajs';
+import { MetricLogger } from 'aws-embedded-metrics';
+import { v4 as uuidv4 } from 'uuid';
+
+interface SensorData {
+  deviceId: string;
+  timestamp: string;
+  coordinates: [number, number];
+  measurements: Record<string, number>;
+}
+
+export const handler = async (event: any) => {
+  const metrics = new MetricLogger();
+  let producer: any;
+
+  try {
+    const data: SensorData = validateInput(event);
+    const correlationId = uuidv4();
+
+    metrics.setNamespace('MotionDRG');
+    metrics.putDimensions({ Service: 'DataProcessor' });
+    metrics.putMetric('ProcessedRecords', 1, 'Count');
+
+    const kafka = new Kafka({
+      clientId: 'motion-drg-processor',
+      brokers: process.env.MSK_BROKERS!.split(','),
+      ssl: true,
+      sasl: {
+        mechanism: 'scram-sha-512',
+        username: process.env.KAFKA_USERNAME!,
+        password: process.env.KAFKA_PASSWORD!,
+      },
+    });
+
+    producer = kafka.producer();
+    await producer.connect();
+
+    await producer.send({
+      topic: 'sensor-data',
+      messages: [{
+        key: data.deviceId,
+        value: JSON.stringify(data),
+        headers: {
+          'correlation-id': correlationId,
+          'processed-timestamp': new Date().toISOString(),
+        },
+      }],
+    });
+
+    return {
+      statusCode: 200,
+      body: JSON.stringify({
+        status: 'success',
+        correlationId,
+      }),
+    };
+  } catch (error) {
+    metrics.putMetric('ProcessingErrors', 1, 'Count');
+    console.error('Processing failed:', error);
+    
+    return {
+      statusCode: 500,
+      body: JSON.stringify({
+        status: 'error',
+        message: 'Data processing failed',
+      }),
+    };
+  } finally {
+    if (producer) {
+      await producer.disconnect();
+    }
+    await metrics.flush();
+  }
+};
+
+function validateInput(event: any): SensorData {
+  // Implementation would validate:
+  // - Required fields
+  // - Data types
+  // - Value ranges
+  // - etc.
+  return event as SensorData;
+}
