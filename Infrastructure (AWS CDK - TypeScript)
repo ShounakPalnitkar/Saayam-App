@@ -1,0 +1,202 @@
+import * as cdk from 'aws-cdk-lib';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as msk from 'aws-cdk-lib/aws-msk';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as location from 'aws-cdk-lib/aws-location';
+
+export class MotionDrgStack extends cdk.Stack {
+  constructor(scope: cdk.App, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    // 1. Web Application (Phase 1)
+    this.setupWebApplication();
+
+    // 2. Backend Services (Phase 2+3)
+    const { api, userPool } = this.setupBackendServices();
+
+    // 3. Mobile Support (Phase 2)
+    this.setupMobileSupport(userPool);
+
+    // 4. Stayam API (Phase 3)
+    this.setupStayamApi(api);
+
+    // 5. Data Processing
+    this.setupDataProcessing();
+  }
+
+  private setupWebApplication() {
+    // Web App Bucket
+    const webAppBucket = new s3.Bucket(this, 'WebAppBucket', {
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // CloudFront Distribution
+    const webAppDistribution = new cloudfront.Distribution(this, 'WebAppDistribution', {
+      defaultBehavior: {
+        origin: new origins.S3Origin(webAppBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+      },
+      defaultRootObject: 'index.html',
+      errorResponses: [
+        {
+          httpStatus: 403,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html',
+        },
+      ],
+    });
+
+    new cdk.CfnOutput(this, 'WebAppUrl', {
+      value: webAppDistribution.distributionDomainName,
+    });
+  }
+
+  private setupBackendServices() {
+    // Cognito User Pool
+    const userPool = new cognito.UserPool(this, 'UserPool', {
+      selfSignUpEnabled: true,
+      signInAliases: { email: true },
+      passwordPolicy: {
+        minLength: 8,
+        requireDigits: true,
+        requireSymbols: true,
+      },
+    });
+
+    const userPoolClient = new cognito.UserPoolClient(this, 'UserPoolClient', {
+      userPool,
+      authFlows: { userPassword: true },
+    });
+
+    // API Gateway
+    const api = new apigateway.RestApi(this, 'StayamApi', {
+      deployOptions: {
+        stageName: 'prod',
+        throttlingRateLimit: 100,
+        throttlingBurstLimit: 200,
+      },
+      defaultCorsPreflightOptions: {
+        allowOrigins: apigateway.Cors.ALL_ORIGINS,
+        allowMethods: apigateway.Cors.ALL_METHODS,
+      },
+    });
+
+    // Authorizer
+    const authorizer = new apigateway.CognitoUserPoolsAuthorizer(this, 'Authorizer', {
+      cognitoUserPools: [userPool],
+    });
+
+    // Example Protected Resource
+    const protectedResource = api.root.addResource('protected');
+    protectedResource.addMethod('GET', new apigateway.LambdaIntegration(
+      new lambda.Function(this, 'ProtectedHandler', {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        handler: 'index.handler',
+        code: lambda.Code.fromInline(`
+          exports.handler = async (event) => {
+            return {
+              statusCode: 200,
+              body: JSON.stringify({ message: 'Authenticated access' })
+            };
+          };
+        `),
+      }),
+      { authorizer }
+    ));
+
+    return { api, userPool };
+  }
+
+  private setupMobileSupport(userPool: cognito.UserPool) {
+    // Identity Pool for Mobile
+    new cognito.CfnIdentityPool(this, 'MobileIdentityPool', {
+      allowUnauthenticatedIdentities: false,
+      cognitoIdentityProviders: [{
+        clientId: userPool.userPoolClientId,
+        providerName: userPool.userPoolProviderName,
+      }],
+    });
+
+    // Mobile backend services would go here
+  }
+
+  private setupStayamApi(api: apigateway.RestApi) {
+    // SDK Lambda
+    const sdkLambda = new lambda.Function(this, 'SdkHandler', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      code: lambda.Code.fromAsset('lambda/sdk'),
+      handler: 'index.handler',
+      environment: {
+        SDK_VERSION: '1.0.0',
+      },
+    });
+
+    // SDK API Resource
+    const sdkResource = api.root.addResource('sdk');
+    sdkResource.addMethod('POST', new apigateway.LambdaIntegration(sdkLambda));
+  }
+
+  private setupDataProcessing() {
+    // VPC for MSK
+    const vpc = new ec2.Vpc(this, 'MskVpc', {
+      maxAzs: 2,
+      subnetConfiguration: [
+        {
+          name: 'Private',
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+        },
+        {
+          name: 'Public',
+          subnetType: ec2.SubnetType.PUBLIC,
+        },
+      ],
+    });
+
+    // MSK Cluster
+    const mskCluster = new msk.Cluster(this, 'MskCluster', {
+      clusterName: 'motion-drg-cluster',
+      kafkaVersion: '2.8.1',
+      numberOfBrokerNodes: 2,
+      vpc,
+      encryptionInTransit: {
+        clientBroker: msk.ClientBrokerEncryption.TLS,
+      },
+      clientAuthentication: {
+        sasl: {
+          scram: true,
+        },
+      },
+    });
+
+    // Location Service
+    new location.CfnPlaceIndex(this, 'LocationIndex', {
+      indexName: 'MotionDrgPlaceIndex',
+      dataSource: 'Here',
+    });
+
+    // Data Processing Lambda
+    const dataProcessor = new lambda.Function(this, 'DataProcessor', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      code: lambda.Code.fromAsset('lambda/data-processor'),
+      handler: 'index.handler',
+      vpc,
+      environment: {
+        MSK_BROKERS: mskCluster.bootstrapBrokersTls,
+      },
+      timeout: cdk.Duration.seconds(30),
+    });
+
+    // Grant permissions
+    mskCluster.grantConnect(dataProcessor);
+  }
+}
